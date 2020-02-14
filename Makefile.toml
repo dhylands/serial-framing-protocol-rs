@@ -1,0 +1,5 @@
+[tasks.allow-server]
+script = [
+	"echo sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add target/debug/examples/server",
+	"echo sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp target/debug/examples/server"
+]

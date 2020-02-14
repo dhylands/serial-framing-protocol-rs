@@ -1,0 +1,18 @@
+[package]
+name = "sfp-rs"
+version = "0.1.0"
+authors = ["Dave Hylands <davehylands@fullstory.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+generic-array = "0.13.2"
+log = "0.4.8"
+pretty-hex = "0.1.1"
+typenum = "1.11.2"
+
+[dev-dependencies]
+cargo-make = "0.26.2"
+simple_logger = "1.5.0"
+structopt = "0.3"
