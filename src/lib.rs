@@ -4,374 +4,396 @@
 #[macro_use]
 extern crate std;
 
-use core::mem::size_of;
-use log::{debug, warn};
+use log::{debug, warn, error};
 
 #[macro_use]
 pub mod macros;
 
 pub mod crc;
 pub mod driver;
+pub mod packet;
 pub mod rawpacket;
+pub mod traits;
 
-use crc::{Crc, CrcAccum};
+#[cfg(test)]
+mod testutils;
 
-enum InternalPacket<'a> {
-    USR { seq: u8, data: &'a [u8] },
-    RTX { seq: u8, data: &'a [u8] },
-    NAK { seq: u8 },
-    Syn0,
-    Syn1,
-    Syn2,
-    Disconnect,
-}
-
-//use packet::Packet;
-/*
-const SOF: u8 = 0x7e;   // Start of Frame
-const ESC: u8 = 0x7d;
-const ESC_FLIP: u8 = 1 << 5;
+use crc::CrcAccum;
+use packet::{FrameType, PacketParser, PacketType, PacketTypeResult, SeqSyn, SEQ_MASK};
+use traits::{PacketBuffer, WritePacket};
 
 const SEQ_INIT: u8 = 0;
-const SEQ_MASK: u8 = 0x3f;        // Lower 6 bits
-const FRAME_TYPE_MASK: u8 = 0xc0; // Upper 2 bits
-
-#[derive(PartialEq)]
-enum EscapeState {
-  Normal,
-  Escaping,
-}
-
-#[derive(PartialEq)]
-enum FrameState {
-  New,
-  Receiving,
-}
 
 #[derive(PartialEq)]
 enum ConnectState {
-  Disconnected,
-  SentSyn0,
-  SentSyn1,
-  Connected,
+    Disconnected,
+    SentSyn0,
+    SentSyn1,
+    Connected,
 }
 
-// FrameType makes up the top 2 bits of the 8-it sequence number.
-c_like_enum! {
-  FrameType {
-    USR = 0x00,
-    RTX = 0x40,
-    NAK = 0x80,
-    SYN = 0xc0,
-  }
-}
-
-// When the FrameType is Syn, then the following enumeration populates
-// the sequence number (lower 6 bits).
-c_like_enum! {
-  SeqSyn {
-    SYN0  = 0,
-    SYN1  = 1,
-    SYN2  = 2,
-    DIS   = 3,
-  }
+#[derive(Debug, PartialEq)]
+pub enum ParseResult {
+    UserPacket,
+    AbortedPacket,
+    PacketTooSmall,
+    CrcError(CrcAccum),
+    MoreDataNeeded,
 }
 
 pub struct Transmitter {
-  seq:  u8,
-  crc:  Crc,
+    connect_state: ConnectState,
+    rx_seq: u8,
+    tx_seq: u8,
 }
 
-struct Receiver<Driver: driver::Driver> {
-  seq:  u8,
-  crc:  Crc,
-  escape_state: EscapeState,
-  frame_state: FrameState,
-  header: u8,
-  packet: Packet<Driver>,
+struct Receiver {
+    parser: PacketParser,
 }
 
-impl<Driver: driver::Driver> Receiver<Driver> {
-  fn new() -> Receiver<Driver> {
-    Receiver {
-      seq: SEQ_INIT,
-      crc: Crc::new(),
-      escape_state: EscapeState::Normal,
-      frame_state: FrameState::New,
-      header: 0,
-      packet: Packet::new(),
+impl Receiver {
+    fn new() -> Self {
+        Self {
+            parser: PacketParser::new(),
+        }
     }
-  }
 
-  fn get_frame_type(&self) -> FrameType {
-    if let Some(frame_type) =  FrameType::from_u8(self.header & FRAME_TYPE_MASK) {
-      frame_type
-    } else {
-      // We can't actually get this case.
-      FrameType::NAK
+    fn reset(&mut self) {
+        self.parser.reset();
     }
-  }
-
-  fn get_frame_seq(&self) -> u8 {
-    return self.header & SEQ_MASK;
-  }
-
-  fn reset(&mut self) {
-    self.crc.reset();
-    self.escape_state = EscapeState::Normal;
-    self.frame_state = FrameState::New;
-    self.packet.reset();
-  }
 }
 
 impl Transmitter {
-  fn new() -> Self {
-    Transmitter {
-      seq: SEQ_INIT,
-      crc: Crc::new(),
-    }
-  }
-}
-
-pub struct Context<Driver: driver::Driver> {
-  connect_state: ConnectState,
-  tx:   Transmitter,
-  rx:   Receiver<Driver>,
-  driver: Driver,
-}
-
-impl <Driver: driver::Driver> Context<Driver> {
-  fn next_frame_seq(&self, seq: u8) -> u8 {
-    return (seq + 1) & SEQ_MASK;
-  }
-}
-
-pub enum DeliverResult<'a, Driver: driver::Driver> {
-  PacketReceived(&'a Packet<Driver>),
-  MoreDataNeeded,
-  CrcError,
-  PacketTooSmall,
-}
-
-impl<Driver: driver::Driver> Context<Driver> {
-  pub fn new(driver: Driver) -> Self {
-    Context {
-      connect_state: ConnectState::Disconnected,
-      tx: Transmitter::new(),
-      rx: Receiver::new(),
-      driver,
-    }
-  }
-
-  pub fn deliver_byte(&mut self, byte: u8) -> DeliverResult<Driver> {
-    if byte == SOF {
-      if self.rx.frame_state == FrameState::Receiving {
-        // We've got a frame
-        return self.handle_frame();
-      }
-      self.rx.reset();
-    } else if byte == ESC {
-      self.rx.escape_state = EscapeState::Escaping;
-    } else {
-      let mut byte = byte;
-      if self.rx.escape_state == EscapeState::Escaping {
-        byte = byte ^ ESC_FLIP;
-        self.rx.escape_state = EscapeState::Normal;
-      }
-      self.rx.crc.accum(byte);
-      if self.rx.frame_state == FrameState::New {
-        self.rx.header = byte;
-        self.rx.frame_state = FrameState::Receiving;
-      } else {
-        if !self.rx.packet.append(byte).is_ok() {
-          // The payload was too big for the packet. This means that the SOF
-          // was corrupted or a bad stream or something. We just reset the
-          // receiver.
-          self.rx.reset();
+    fn new() -> Self {
+        Self {
+            connect_state: ConnectState::Disconnected,
+            rx_seq: SEQ_INIT,
+            tx_seq: SEQ_INIT,
         }
-      }
-    }
-    DeliverResult::MoreDataNeeded
-  }
-
-  pub fn handle_frame(&mut self) -> DeliverResult<Driver> {
-    if self.rx.packet.len() < size_of::<CrcAccum>() {
-      warn!("Short frame received - sending NAK");
-      self.transmit_nak(self.rx.seq);
-      return DeliverResult::PacketTooSmall;
     }
 
-    let crc = self.rx.packet.remove_crc();
-    if crc != crc::CRC_GOOD {
-      warn!("CRC mismatch - sending NAK");
-      self.transmit_nak(self.rx.seq);
-      return DeliverResult::CrcError;
+    fn reset(&mut self) {
+        self.connect_state = ConnectState::Disconnected;
+        self.rx_seq = SEQ_INIT;
+        self.tx_seq = SEQ_INIT;
+        self.clear_history();
     }
-    let frame_type = self.rx.get_frame_type();
-    match frame_type {
-      FrameType::USR | FrameType::RTX => {
-        return self.handle_frame_usr();
-      },
-      FrameType::NAK => {
-        self.handle_frame_nak();
-      },
-      FrameType::SYN => {
-        self.handle_frame_syn();
-      },
+
+    fn next_frame_seq(&self, seq: u8) -> u8 {
+        return (seq + 1) & SEQ_MASK;
     }
-    DeliverResult::MoreDataNeeded
-  }
 
-  fn handle_frame_usr(&mut self) -> DeliverResult<Driver> {
-    let frame_type = self.rx.get_frame_type();
-    let seq = self.rx.get_frame_seq();
-    debug!("Received {:?} frame, Seq: {}", frame_type, seq);
-
-    match self.connect_state {
-      ConnectState::Disconnected => {
-        self.transmit_dis();
-      },
-      ConnectState::SentSyn0 => {
-        self.transmit_syn0();
-      },
-      ConnectState::SentSyn1 => {
-        self.transmit_syn1();
-      },
-      ConnectState::Connected => {
-        if seq != self.rx.seq {
-          if frame_type == FrameType::USR {
-            warn!("Out of order frame received - sending NAK");
-            self.transmit_nak(self.rx.get_frame_seq());
-          } else {
-            warn!("Out of order retransmitted frame frame received - ignoring");
-          }
-        } else {
-          // Good user frame received and accepted. Deliver it.
-          self.rx.seq = self.next_frame_seq(self.rx.seq);
-          return DeliverResult::PacketReceived(&self.rx.packet);
+    pub fn handle_packet(
+        &mut self,
+        packet_type: PacketType,
+        writer: &mut dyn WritePacket,
+    ) -> ParseResult {
+        debug!("Received {:?}", packet_type);
+        match packet_type {
+            PacketType::USR { seq } => {
+                return self.handle_frame_usr_rtx(FrameType::USR, seq, writer);
+            }
+            PacketType::RTX { seq } => {
+                return self.handle_frame_usr_rtx(FrameType::RTX, seq, writer);
+            }
+            PacketType::NAK { seq } => {
+                self.handle_frame_nak(seq, writer);
+            }
+            PacketType::Syn0 => {
+                self.handle_frame_syn0(writer);
+            }
+            PacketType::Syn1 => {
+                self.handle_frame_syn1(writer);
+            }
+            PacketType::Syn2 => {
+                self.handle_frame_syn2(writer);
+            }
+            PacketType::Disconnect => {
+                self.handle_frame_disconnect();
+            }
         }
-      },
+        ParseResult::MoreDataNeeded
     }
-    DeliverResult::MoreDataNeeded
-  }
 
-  fn handle_frame_nak(&mut self) {
-    //TODO
-
-  }
-
-  fn handle_frame_syn(&mut self) {
-    let seq = self.rx.get_frame_seq();
-
-    match SeqSyn::from_u8(seq) {
-      Some(SeqSyn::SYN0) => self.handle_frame_syn0(),
-      Some(SeqSyn::SYN1) => self.handle_frame_syn1(),
-      Some(SeqSyn::SYN2) => self.handle_frame_syn2(),
-      Some(SeqSyn::DIS) => self.handle_frame_dis(),
-      None => {
-        warn!("SYN with unknown seq: {}", seq);
-      }
+    fn handle_frame_usr_rtx(
+        &mut self,
+        frame_type: FrameType,
+        seq: u8,
+        writer: &mut dyn WritePacket,
+    ) -> ParseResult {
+        match self.connect_state {
+            ConnectState::Disconnected => {
+                self.transmit_dis(writer);
+            }
+            ConnectState::SentSyn0 => {
+                self.transmit_syn0(writer);
+            }
+            ConnectState::SentSyn1 => {
+                self.transmit_syn1(writer);
+            }
+            ConnectState::Connected => {
+                if seq != self.rx_seq {
+                    if frame_type == FrameType::USR {
+                        warn!("Out of order frame received - sending NAK");
+                        self.transmit_nak(self.rx_seq, writer);
+                    } else {
+                        warn!("Out of order retransmitted frame frame received - ignoring");
+                    }
+                } else {
+                    // Good user frame received and accepted. Deliver it.
+                    self.rx_seq = self.next_frame_seq(self.rx_seq);
+                    return ParseResult::UserPacket;
+                }
+            }
+        }
+        ParseResult::MoreDataNeeded
     }
-  }
 
-  fn handle_frame_syn0(&mut self) {
-    self.rx.seq = SEQ_INIT;
-    self.tx.seq = SEQ_INIT;
-    self.clear_history();
-    self.connect_state = ConnectState::SentSyn1;
-    self.transmit_syn1();
-  }
-
-  fn handle_frame_syn1(&mut self) {
-    if self.connect_state == ConnectState::Disconnected {
-      self.transmit_dis();
-      return;
+    fn handle_frame_nak(&mut self, _seq: u8, _writer: &mut dyn WritePacket) {
+        //TODO
     }
-    self.connect_state = ConnectState::Connected;
-    debug!("Connected (after SYN1)");
-    self.transmit_syn2();
-    if self.tx.seq != SEQ_INIT {
-      self.transmit_history_from_seq(SEQ_INIT);
+
+    fn handle_frame_syn0(&mut self, writer: &mut dyn WritePacket) {
+        self.rx_seq = SEQ_INIT;
+        self.tx_seq = SEQ_INIT;
+        self.clear_history();
+        self.connect_state = ConnectState::SentSyn1;
+        self.transmit_syn1(writer);
     }
-  }
 
-  fn handle_frame_syn2(&mut self) {
-    if self.connect_state == ConnectState::Disconnected {
-      self.transmit_dis();
-      return;
+    fn handle_frame_syn1(&mut self, writer: &mut dyn WritePacket) {
+        if self.connect_state == ConnectState::Disconnected {
+            self.transmit_dis(writer);
+            return;
+        }
+        self.connect_state = ConnectState::Connected;
+        debug!("Connected (after SYN1)");
+        self.transmit_syn2(writer);
+        if self.tx_seq != SEQ_INIT {
+            self.transmit_history_from_seq(SEQ_INIT, writer);
+        }
     }
-    if self.connect_state == ConnectState::SentSyn0 {
-      self.transmit_syn0();
-      return;
+
+    fn handle_frame_syn2(&mut self, writer: &mut dyn WritePacket) {
+        if self.connect_state == ConnectState::Disconnected {
+            self.transmit_dis(writer);
+            return;
+        }
+        if self.connect_state == ConnectState::SentSyn0 {
+            self.transmit_syn0(writer);
+            return;
+        }
+        self.connect_state = ConnectState::Connected;
+        debug!("Connected (after SYN2)");
+        if self.tx_seq != SEQ_INIT {
+            self.transmit_history_from_seq(SEQ_INIT, writer);
+        }
     }
-    self.connect_state = ConnectState::Connected;
-    debug!("Connected (after SYN2)");
-    self.transmit_syn2();
-    if self.tx.seq != SEQ_INIT {
-      self.transmit_history_from_seq(SEQ_INIT);
+
+    fn handle_frame_disconnect(&mut self) {
+        self.connect_state = ConnectState::Disconnected;
     }
-  }
 
-  fn handle_frame_dis(&mut self) {
-    self.connect_state = ConnectState::Disconnected;
-  }
-
-  fn clear_history(&mut self) {
-    // TODO
-  }
-
-  fn transmit_history_from_seq(&mut self, seq: u8) {
-    // TODO
-  }
-
-  fn transmit_nak(&mut self, seq: u8) {
-    self.transmit_control_packet(FrameType::NAK, seq);
-  }
-
-  fn transmit_dis(&mut self) {
-    self.transmit_control_packet(FrameType::SYN, SeqSyn::DIS as u8);
-  }
-
-  fn transmit_syn0(&mut self) {
-    self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN0 as u8);
-  }
-
-  fn transmit_syn1(&mut self) {
-    self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN1 as u8);
-  }
-
-  fn transmit_syn2(&mut self) {
-    self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN2 as u8);
-  }
-
-  fn transmit_control_packet(&mut self, frame_type: FrameType, seq: u8) {
-    let header = (frame_type as u8) | (seq & SEQ_MASK);
-    self.tx.crc.reset();
-
-    self.driver.start_write();
-    self.driver.write_byte(SOF);
-    self.write_escaped(header);
-    self.write_crc();
-    self.driver.write_byte(SOF);
-    self.driver.end_write();
-  }
-
-  fn write_crc(&mut self) {
-    // Write the CRC out LSB first
-    let crc_lsb = self.tx.crc.lsb();
-    let crc_msb = self.tx.crc.msb();
-    self.write_escaped(crc_lsb);
-    self.write_escaped(crc_msb);
-  }
-
-  fn write_escaped(&mut self, byte: u8) {
-    self.tx.crc.accum(byte);
-    if byte == ESC || byte == SOF {
-      self.driver.write_byte(ESC);
-      self.driver.write_byte(ESC ^ ESC_FLIP);
-    } else {
-      self.driver.write_byte(byte);
+    fn clear_history(&mut self) {
+        // TODO
     }
-  }
+
+    fn transmit_history_from_seq(&mut self, _seq: u8, _writer: &mut dyn WritePacket) {
+        // TODO
+    }
+
+    fn transmit_nak(&mut self, seq: u8, writer: &mut dyn WritePacket) {
+        self.transmit_control_packet(FrameType::NAK, seq, writer);
+    }
+
+    fn transmit_dis(&mut self, writer: &mut dyn WritePacket) {
+        self.transmit_control_packet(FrameType::SYN, SeqSyn::DIS as u8, writer);
+    }
+
+    fn transmit_syn0(&mut self, writer: &mut dyn WritePacket) {
+        self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN0 as u8, writer);
+    }
+
+    fn transmit_syn1(&mut self, writer: &mut dyn WritePacket) {
+        self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN1 as u8, writer);
+    }
+
+    fn transmit_syn2(&mut self, writer: &mut dyn WritePacket) {
+        self.transmit_control_packet(FrameType::SYN, SeqSyn::SYN2 as u8, writer);
+    }
+
+    fn transmit_control_packet(
+        &mut self,
+        frame_type: FrameType,
+        seq: u8,
+        writer: &mut dyn WritePacket,
+    ) {
+        let header = (frame_type as u8) | (seq & SEQ_MASK);
+        let data: &[u8] = &[];
+
+        writer.write_packet_data(header, data);
+    }
 }
-*/
+
+pub struct Context {
+    tx: Transmitter,
+    rx: Receiver,
+}
+
+impl Context {
+    pub fn new() -> Self {
+        Self {
+            tx: Transmitter::new(),
+            rx: Receiver::new(),
+        }
+    }
+
+    pub fn connect(&mut self, writer: &mut dyn WritePacket) {
+        self.tx.reset();
+        self.rx.reset();
+        self.tx.transmit_syn0(writer);
+        self.tx.connect_state = ConnectState::SentSyn0;
+    }
+
+    pub fn is_connected(&self) -> bool {
+        return self.tx.connect_state == ConnectState::Connected;
+    }
+
+    pub fn parse_byte(
+        &mut self,
+        byte: u8,
+        rx_data: &mut dyn PacketBuffer,
+        writer: &mut dyn WritePacket,
+    ) -> ParseResult {
+        let parse_result = self.rx.parser.parse_byte(byte, rx_data);
+        match parse_result {
+            PacketTypeResult::PacketReceived(packet_type) => {
+                self.tx.handle_packet(packet_type, writer)
+            }
+            PacketTypeResult::AbortedPacket => ParseResult::AbortedPacket,
+            PacketTypeResult::PacketTooSmall => ParseResult::PacketTooSmall,
+            PacketTypeResult::CrcError(rcvd_crc) => ParseResult::CrcError(rcvd_crc),
+            PacketTypeResult::MoreDataNeeded => ParseResult::MoreDataNeeded,
+        }
+    }
+
+    pub fn write_packet(&mut self, data: &[u8], writer: &mut dyn WritePacket) {
+        if !self.is_connected() {
+            error!("Not connected");
+            return;
+        }
+        let header: u8 = FrameType::USR as u8 | self.tx.tx_seq;
+
+        // TODO Add the packet to the transmit history
+        writer.write_packet_data(header, data);
+        self.tx.tx_seq = self.tx.next_frame_seq(self.tx.tx_seq);
+    }
+}
+
+// ===========================================================================
+//
+// Tests
+//
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutils::{setup_log, TestPacketBuffer};
+    use crate::traits::{PacketBuffer, SOF};
+    use log::info;
+
+    impl Context {
+        // Parse a bunch of bytes and return the first return code that isn't
+        // MoreDataNeeded. This means that this function will parse at most one
+        // error or packet from the input stream, which is fine for testing.
+        pub fn parse_bytes(
+            &mut self,
+            bytes: &[u8],
+            rx_packet: &mut dyn PacketBuffer,
+            writer: &mut dyn WritePacket,
+        ) -> ParseResult {
+            writer.start_write();   // Clears the outout buffer.
+            for byte in bytes.iter() {
+                let parse_result = self.parse_byte(*byte, rx_packet, writer);
+                match parse_result {
+                    ParseResult::UserPacket => {
+                        return ParseResult::UserPacket;
+                    }
+
+                    ParseResult::MoreDataNeeded => {
+                        continue;
+                    }
+
+                    ParseResult::AbortedPacket => {
+                        return ParseResult::AbortedPacket;
+                    }
+
+                    ParseResult::PacketTooSmall => {
+                        return ParseResult::PacketTooSmall;
+                    }
+
+                    ParseResult::CrcError(rcvd_crc) => {
+                        return ParseResult::CrcError(rcvd_crc);
+                    }
+                }
+            }
+            ParseResult::MoreDataNeeded
+        }
+    }
+
+    #[test]
+    fn test_connect() {
+        setup_log();
+
+        info!("Running test_connect");
+
+        let mut packet1to2 = TestPacketBuffer::new();
+        let mut packet2to1 = TestPacketBuffer::new();
+        let mut packet1 = TestPacketBuffer::new();
+        let mut packet2 = TestPacketBuffer::new();
+        let mut ctx1 = Context::new();
+        let mut ctx2 = Context::new();
+
+        ctx1.connect(&mut packet1to2);
+
+        // This should put a SYN0 packet into packet2
+        assert_eq!(packet1to2.data().to_vec(), vec![SOF, 0xc0, 0x74, 0x36, SOF]);
+
+        // Sending the SYN0 to the other side, should generate a SYN1 in response
+        assert_eq!(
+            ctx2.parse_bytes(packet1to2.data(), &mut packet2, &mut packet2to1),
+            ParseResult::MoreDataNeeded
+        );
+        assert_eq!(packet2to1.data().to_vec(), vec![SOF, 0xc1, 0xfd, 0x27, SOF]);
+
+        // Sending SYN1 to initial side should generate a SYN2 in response Side 1 should be connected
+        assert_eq!(
+            ctx1.parse_bytes(packet2to1.data(), &mut packet1, &mut packet1to2),
+            ParseResult::MoreDataNeeded
+        );
+        assert!(ctx1.is_connected());
+        assert_eq!(packet1to2.data().to_vec(), vec![SOF, 0xc2, 0x66, 0x15, SOF]);
+
+        // Sending the SYN2 to Side 2 should then put it into a connected state
+        assert_eq!(
+            ctx2.parse_bytes(packet1to2.data(), &mut packet2, &mut packet2to1),
+            ParseResult::MoreDataNeeded
+        );
+        assert!(ctx2.is_connected());
+        assert_eq!(packet2to1.data().to_vec(), vec![]);
+
+        // Send a User packet from Side 1 to Side 2
+
+        ctx1.write_packet("Testing".as_bytes(), &mut packet1to2);
+        assert_eq!(packet1to2.data().to_vec(), vec![SOF, 0x00, 0x54, 0x65, 0x73, 0x74, 0x69, 0x6e, 0x67, 0xc5, 0x5c, SOF]);
+        assert_eq!(
+            ctx2.parse_bytes(packet1to2.data(), &mut packet2, &mut packet2to1),
+            ParseResult::UserPacket
+        );
+        assert_eq!(packet2.data(), "Testing".as_bytes());
+        assert_eq!(packet2to1.data().to_vec(), vec![]);
+
+        //info!("packet1to2: {:?}", packet1to2.dump());
+    }
+}

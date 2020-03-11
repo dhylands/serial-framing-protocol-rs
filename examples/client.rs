@@ -48,11 +48,28 @@ fn main() {
 
     let server_addr = format!("127.0.0.1:{}", opt.port);
     match TcpStream::connect(server_addr) {
-        Ok(mut stream) => {
+        Ok(stream) => {
             handle_connection(stream).unwrap();
         }
         Err(e) => {
             println!("Error writing data {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::{error, info, warn};
+    use simple_logger;
+    use std::sync::Once;
+    use std::vec::Vec;
+
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            simple_logger::init().unwrap();
+        });
     }
 }

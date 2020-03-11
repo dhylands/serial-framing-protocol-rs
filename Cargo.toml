@@ -1,5 +1,5 @@
 [package]
-name = "sfp-rs"
+name = "serial-framing-protocol"
 version = "0.1.0"
 authors = ["Dave Hylands <davehylands@fullstory.com>"]
 edition = "2018"

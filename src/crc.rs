@@ -46,8 +46,8 @@ impl Crc {
     }
 
     pub fn reset(&mut self) {
-        //info!("CRC init");
-        self.val = CRC_INIT;
+        //info!("CRC reset");
+        *self = Default::default();
     }
 
     pub fn crc(&self) -> CrcAccum {
@@ -67,7 +67,7 @@ impl Crc {
 mod tests {
     #[test]
     fn test0() {
-        use crate::Crc;
+        use crate::crc::Crc;
         let mut crc = Crc::new();
         crc.accum(0xc0);
         assert_eq!(!crc.val, 0x3674);
@@ -75,7 +75,7 @@ mod tests {
     }
     #[test]
     fn test1() {
-        use crate::Crc;
+        use crate::crc::Crc;
         let mut crc = Crc::new();
         crc.accum(0xc0);
         crc.accum(0x11);
@@ -86,7 +86,7 @@ mod tests {
     }
     #[test]
     fn test2() {
-        use crate::Crc;
+        use crate::crc::Crc;
         let mut crc = Crc::new();
         crc.accum(0x7d);
         assert_eq!(!crc.val, 0x581a);
