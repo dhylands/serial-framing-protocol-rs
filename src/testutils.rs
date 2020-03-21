@@ -8,7 +8,7 @@ use std::vec::Vec;
 
 use super::crc::Crc;
 use super::rawpacket::{RawPacketParser, RawParseResult};
-use super::traits::{PacketBuffer, PacketQueue, WritePacket};
+use super::traits::{PacketBuffer, PacketQueue, PacketWriter, Storage};
 
 static INIT: Once = Once::new();
 
@@ -29,12 +29,18 @@ impl fmt::Debug for TestPacketBuffer {
     }
 }
 
-impl TestPacketBuffer {
-    pub fn new() -> Self {
-        Self {
+impl Default for TestPacketBuffer {
+    fn default() -> Self {
+        TestPacketBuffer {
             len: 0,
             buf: [0; 256],
         }
+    }
+}
+
+impl TestPacketBuffer {
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -60,7 +66,7 @@ impl PacketBuffer for TestPacketBuffer {
     }
 }
 
-impl WritePacket for TestPacketBuffer {
+impl PacketWriter for TestPacketBuffer {
     fn start_write(&mut self) {
         //info!("start_write");
         self.reset();
@@ -144,8 +150,7 @@ pub struct TestPacketQueue {
     packet: [TestPacketBuffer; QUEUE_SIZE],
 }
 
-impl<'a> PacketQueue<'a> for TestPacketQueue {
-
+impl PacketQueue for TestPacketQueue {
     /// Returns the maximum number of packets which can be stored.
     fn capacity(&self) -> usize {
         QUEUE_SIZE
@@ -162,7 +167,7 @@ impl<'a> PacketQueue<'a> for TestPacketQueue {
     }
 
     /// Returns a reference to the next packet to send.
-    fn next(&mut self) -> &mut (dyn PacketBuffer + 'a) {
+    fn next(&mut self) -> &mut dyn PacketBuffer {
         self.idx = (self.idx + 1) % QUEUE_SIZE;
         self.len = max(self.len + 1, QUEUE_SIZE);
         &mut self.packet[self.idx]
@@ -170,7 +175,7 @@ impl<'a> PacketQueue<'a> for TestPacketQueue {
 
     /// Returns the idx'th most recent packet. Passing in 0 returns the most
     /// recent, passing in 1 returns the packet before that, etc.
-    fn get(&self, offset: usize) -> Option<&(dyn PacketBuffer + 'a)> {
+    fn get(&self, offset: usize) -> Option<&dyn PacketBuffer> {
         if offset < self.len {
             let idx = if self.idx < offset {
                 self.idx + QUEUE_SIZE - offset
@@ -182,5 +187,59 @@ impl<'a> PacketQueue<'a> for TestPacketQueue {
             None
         }
     }
+}
 
+impl TestPacketQueue {
+    fn new() -> Self {
+        TestPacketQueue {
+            len: 0,
+            idx: 0,
+            packet: Default::default(),
+        }
+    }
+}
+
+pub struct TestStorage {
+    rx_buf: TestPacketBuffer,
+    tx_buf: TestPacketBuffer,
+    tx_queue: TestPacketQueue,
+}
+impl Storage for TestStorage {
+    /// Returns a reference to Rx PacketBuffer
+    fn rx_buf(&mut self) -> &mut dyn PacketBuffer {
+        &mut self.rx_buf
+    }
+
+    /// Returns a reference to the PacketWriter
+    fn tx_writer(&mut self) -> &mut dyn PacketWriter {
+        &mut self.tx_buf
+    }
+
+    /// Returns a reference to the PacketQueue
+    fn tx_queue(&mut self) -> &mut dyn PacketQueue {
+        &mut self.tx_queue
+    }
+}
+
+// A few methods to help out with testing.
+impl TestStorage {
+    pub fn new() -> Self {
+        TestStorage {
+            rx_buf: TestPacketBuffer::new(),
+            tx_buf: TestPacketBuffer::new(),
+            tx_queue: TestPacketQueue::new(),
+        }
+    }
+
+    pub fn rx_data(&self) -> &[u8] {
+        self.rx_buf.data()
+    }
+
+    pub fn tx_data(&self) -> &[u8] {
+        self.tx_buf.data()
+    }
+
+    pub fn tx_vec(&self) -> Vec<u8> {
+        self.tx_data().to_vec()
+    }
 }

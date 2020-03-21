@@ -78,7 +78,7 @@ impl fmt::Debug for dyn PacketBuffer {
     }
 }
 
-pub trait WritePacket {
+pub trait PacketWriter {
     /// Called at the beginning of writing a packet. Allows the driver implementation to implement
     /// buffering.
     fn start_write(&mut self) {}
@@ -134,21 +134,31 @@ pub trait WritePacket {
 
 /// The PacketQueue is used to store the N most recent packets which have
 /// been sent.
-pub trait PacketQueue<'a> {
-
+pub trait PacketQueue {
     /// Returns the maximum number of packets which can be stored.
     fn capacity(&self) -> usize;
 
     /// Returns the number of packets currently in the queue.
     fn len(&self) -> usize;
-    
+
     /// Removes all packets from the queue.
     fn clear(&mut self);
 
     /// Returns a reference to the next packet to send.
-    fn next(&mut self) -> &mut (dyn PacketBuffer + 'a);
+    fn next(&mut self) -> &mut dyn PacketBuffer;
 
     /// Returns the offset'th most recent packet. Passing in 0 returns the most
     /// recent, passing in 1 returns the packet before that, etc.
-    fn get(&self, offset: usize) -> Option<&(dyn PacketBuffer + 'a)>;
+    fn get(&self, offset: usize) -> Option<&dyn PacketBuffer>;
+}
+
+pub trait Storage {
+    /// Returns a reference to Rx PacketBuffer
+    fn rx_buf(&mut self) -> &mut dyn PacketBuffer;
+
+    /// Returns a reference to the PacketWriter
+    fn tx_writer(&mut self) -> &mut dyn PacketWriter;
+
+    /// Returns a reference to the PacketQueue
+    fn tx_queue(&mut self) -> &mut dyn PacketQueue;
 }

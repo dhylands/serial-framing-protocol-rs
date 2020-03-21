@@ -136,7 +136,7 @@ impl<'a> RawPacketParser {
 mod tests {
     use super::*;
     use crate::testutils::{parse_bytes, parse_bytes_as_packet, setup_log, TestPacketBuffer};
-    use crate::traits::WritePacket;
+    use crate::traits::PacketWriter;
     use log::info;
     use pretty_hex::*;
     use std::vec::Vec;
