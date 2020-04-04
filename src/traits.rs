@@ -1,3 +1,4 @@
+use core::cmp::min;
 use core::fmt;
 use core::mem::size_of;
 use log::info;
@@ -10,6 +11,9 @@ pub const ESC: u8 = 0x7d;
 pub const ESC_FLIP: u8 = 0x20;
 
 pub trait PacketBuffer {
+    /// Returns the capacity of the packet buffer.
+    fn capacity(&self) -> usize;
+
     /// Returns the number of bytes which have currently been accumulated in
     /// the packet buffer.
     fn len(&self) -> usize;
@@ -20,11 +24,20 @@ pub trait PacketBuffer {
     /// Returns a slice containing valid packet data.
     fn data(&self) -> &[u8];
 
-    /// Returns the capacity of the packet buffer.
-    fn capacity(&self) -> usize;
+    /// Returns a mutable slice of the entire buffer.
+    fn data_mut(&mut self) -> &mut [u8];
 
     /// Stores a byte into the buffer.
-    fn store(&mut self, idx: usize, byte: u8);
+    fn store_byte_at(&mut self, idx: usize, byte: u8) {
+        self.data_mut()[idx] = byte;
+    }
+
+    /// Copies the indicated data into the buffer.
+    fn store_data(&mut self, data: &[u8]) {
+        let copy_len = min(data.len(), self.capacity());
+        self.data_mut()[..copy_len].copy_from_slice(&data[..copy_len]);
+        self.set_len(copy_len);
+    }
 
     /// Determines if the current buffer is currently empty or not.
     fn is_empty(&self) -> bool {
@@ -42,7 +55,7 @@ pub trait PacketBuffer {
         let len = self.len();
         if len < self.capacity() {
             self.set_len(len + 1);
-            self.store(len, byte);
+            self.store_byte_at(len, byte);
             Ok(())
         } else {
             Err(())
@@ -132,8 +145,9 @@ pub trait PacketWriter {
     }
 }
 
-/// The PacketQueue is used to store the N most recent packets which have
-/// been sent.
+/// The PacketQueue is used to store `len` most recent packets which have
+/// been sent. Packets are added in a circular fashion. `idx` will point
+/// to the most recently added packet.
 pub trait PacketQueue {
     /// Returns the maximum number of packets which can be stored.
     fn capacity(&self) -> usize;
@@ -141,15 +155,47 @@ pub trait PacketQueue {
     /// Returns the number of packets currently in the queue.
     fn len(&self) -> usize;
 
+    /// Sets the number of packets currently in the queue.
+    fn set_len(&mut self, len: usize);
+
+    // Returns the index of the most recently added packet to the queue.
+    fn idx(&self) -> usize;
+
+    /// Sets the index of the nmost recently added packet to the queue.
+    fn set_idx(&mut self, len: usize);
+
+    /// Returns the idx'th packet from the queue.
+    fn packet(&mut self, idx: usize) -> Option<&mut dyn PacketBuffer>;
+
     /// Removes all packets from the queue.
-    fn clear(&mut self);
+    fn clear(&mut self) {
+        self.set_len(0);
+        self.set_idx(0);
+    }
 
     /// Returns a reference to the next packet to send.
-    fn next(&mut self) -> &mut dyn PacketBuffer;
+    fn next(&mut self) -> &mut dyn PacketBuffer {
+        if self.len() < self.capacity() {
+            self.set_len(self.len() + 1);
+        }
+        self.set_idx((self.idx() + 1) % self.capacity());
+        self.packet(self.idx()).unwrap()
+    }
 
     /// Returns the offset'th most recent packet. Passing in 0 returns the most
     /// recent, passing in 1 returns the packet before that, etc.
-    fn get(&self, offset: usize) -> Option<&dyn PacketBuffer>;
+    fn get(&mut self, offset: usize) -> Option<&mut dyn PacketBuffer> {
+        if offset < self.len() {
+            let idx = if self.idx() < offset {
+                self.idx() + self.capacity() - offset
+            } else {
+                self.idx() - offset
+            };
+            self.packet(idx)
+        } else {
+            None
+        }
+    }
 }
 
 pub trait Storage {

@@ -72,11 +72,11 @@ impl Transmitter {
         }
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, storage: &mut dyn Storage) {
         self.connect_state = ConnectState::Disconnected;
         self.rx_seq = SEQ_INIT;
         self.tx_seq = SEQ_INIT;
-        self.clear_history();
+        self.clear_history(storage);
     }
 
     fn next_frame_seq(&self, seq: u8) -> u8 {
@@ -156,7 +156,7 @@ impl Transmitter {
     fn handle_frame_syn0(&mut self, storage: &mut dyn Storage) {
         self.rx_seq = SEQ_INIT;
         self.tx_seq = SEQ_INIT;
-        self.clear_history();
+        self.clear_history(storage);
         self.connect_state = ConnectState::SentSyn1;
         self.transmit_syn1(storage.tx_writer());
     }
@@ -194,8 +194,8 @@ impl Transmitter {
         self.connect_state = ConnectState::Disconnected;
     }
 
-    fn clear_history(&mut self) {
-        // TODO
+    fn clear_history(&mut self, storage: &mut dyn Storage) {
+        storage.tx_queue().clear();
     }
 
     fn transmit_history_from_seq(&mut self, _seq: u8, _storage: &mut dyn Storage) {
@@ -249,7 +249,7 @@ impl Context {
     }
 
     pub fn connect(&mut self, storage: &mut dyn Storage) {
-        self.tx.reset();
+        self.tx.reset(storage);
         self.rx.reset();
         self.tx.transmit_syn0(storage.tx_writer());
         self.tx.connect_state = ConnectState::SentSyn0;
@@ -279,7 +279,9 @@ impl Context {
         }
         let header: u8 = FrameType::USR as u8 | self.tx.tx_seq;
 
-        // TODO Add the packet to the transmit history
+        let tx_buf = storage.tx_queue().next();
+        tx_buf.store_data(data);
+
         storage.tx_writer().write_packet_data(header, data);
         self.tx.tx_seq = self.tx.next_frame_seq(self.tx.tx_seq);
     }
@@ -335,13 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn test_connect() {
+    fn test() {
         setup_log();
 
         info!("Running test_connect");
 
         let mut storage1 = TestStorage::new();
-        let mut storage2: TestStorage = TestStorage::new();
+        let mut storage2 = TestStorage::new();
 
         let mut ctx1 = Context::new();
         let mut ctx2 = Context::new();
@@ -387,6 +389,11 @@ mod tests {
         );
         assert_eq!(storage2.rx_data(), "Testing".as_bytes());
         assert_eq!(storage2.tx_vec(), vec![]);
+
+        // Make sure that the user packet is in the history buffer
+
+        let last_pkt = storage1.tx_queue().get(0).unwrap();
+        assert_eq!(last_pkt.data(), "Testing".as_bytes());
 
         //info!("packet1to2: {:?}", packet1to2.dump());
     }

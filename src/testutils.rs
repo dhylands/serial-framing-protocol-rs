@@ -1,5 +1,4 @@
-use core::cmp::max;
-use core::fmt;
+use core::cmp::{max, min};
 use log::{error, info, warn};
 use pretty_hex::*;
 use simple_logger;
@@ -18,22 +17,18 @@ pub fn setup_log() {
     });
 }
 
+const PACKET_SIZE: usize = 256;
+
 pub struct TestPacketBuffer {
     len: usize,
-    buf: [u8; 256],
-}
-
-impl fmt::Debug for TestPacketBuffer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", (&self.buf[0..self.len]).hex_dump())
-    }
+    buf: [u8; PACKET_SIZE],
 }
 
 impl Default for TestPacketBuffer {
     fn default() -> Self {
         TestPacketBuffer {
             len: 0,
-            buf: [0; 256],
+            buf: [0; PACKET_SIZE],
         }
     }
 }
@@ -46,7 +41,7 @@ impl TestPacketBuffer {
 
 impl PacketBuffer for TestPacketBuffer {
     fn capacity(&self) -> usize {
-        self.buf.len()
+        PACKET_SIZE
     }
 
     fn len(&self) -> usize {
@@ -54,15 +49,15 @@ impl PacketBuffer for TestPacketBuffer {
     }
 
     fn set_len(&mut self, len: usize) {
-        self.len = len;
+        self.len = min(len, PACKET_SIZE);
     }
 
     fn data(&self) -> &[u8] {
         &self.buf[0..self.len]
     }
 
-    fn store(&mut self, idx: usize, byte: u8) {
-        self.buf[idx] = byte;
+    fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[..]
     }
 }
 
@@ -73,8 +68,71 @@ impl PacketWriter for TestPacketBuffer {
     }
 
     fn write_byte(&mut self, byte: u8) {
-        //info!("write_byte 0x{:02x}", byte);
+        //info!("write_byte 0x{:02x} self.len = {}", byte, self.len());
         self.append(byte).unwrap();
+    }
+
+    fn end_write(&mut self) {
+        //info!("end_write");
+    }
+}
+
+const QUEUE_SIZE: usize = 8;
+pub struct TestPacketQueue {
+    len: usize,
+    idx: usize,
+    packet: [TestPacketBuffer; QUEUE_SIZE],
+}
+
+impl PacketQueue for TestPacketQueue {
+    /// Returns the maximum number of packets which can be stored.
+    fn capacity(&self) -> usize {
+        QUEUE_SIZE
+    }
+
+    /// Returns the number of packets currently in the queue.
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Sets the number of packets currently in the queue.
+    fn set_len(&mut self, len: usize) {
+        self.len = min(len, QUEUE_SIZE);
+        self.idx = if self.len > 0 {
+            min(self.idx, self.len - 1)
+        } else {
+            0
+        }
+    }
+
+    /// Returns the index of the most recently added packet to the queue.
+    fn idx(&self) -> usize {
+        self.idx
+    }
+
+    /// Sets the index of the nmost recently added packet to the queue.
+    fn set_idx(&mut self, idx: usize) {
+        self.idx = min(idx, QUEUE_SIZE - 1);
+        self.len = max(self.len, self.idx + 1);
+    }
+
+    /// Returns the i'th packet from the queue.
+    fn packet(&mut self, idx: usize) -> Option<&mut dyn PacketBuffer> {
+        if idx < self.len {
+            Some(&mut self.packet[idx])
+        } else {
+            None
+        }
+    }
+}
+
+impl TestPacketQueue {
+    fn new() -> Self {
+        TestPacketQueue {
+            len: 0,
+            idx: 0,
+            packet: Default::default(),
+        }
     }
 }
 
@@ -139,62 +197,6 @@ pub fn parse_bytes_as_packet(
         _ => {
             error!("{:?}", parse_result);
             return Vec::new();
-        }
-    }
-}
-
-const QUEUE_SIZE: usize = 8;
-pub struct TestPacketQueue {
-    len: usize,
-    idx: usize,
-    packet: [TestPacketBuffer; QUEUE_SIZE],
-}
-
-impl PacketQueue for TestPacketQueue {
-    /// Returns the maximum number of packets which can be stored.
-    fn capacity(&self) -> usize {
-        QUEUE_SIZE
-    }
-
-    /// Returns the number of packets currently in the queue.
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Removes all packets from the queue.
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    /// Returns a reference to the next packet to send.
-    fn next(&mut self) -> &mut dyn PacketBuffer {
-        self.idx = (self.idx + 1) % QUEUE_SIZE;
-        self.len = max(self.len + 1, QUEUE_SIZE);
-        &mut self.packet[self.idx]
-    }
-
-    /// Returns the idx'th most recent packet. Passing in 0 returns the most
-    /// recent, passing in 1 returns the packet before that, etc.
-    fn get(&self, offset: usize) -> Option<&dyn PacketBuffer> {
-        if offset < self.len {
-            let idx = if self.idx < offset {
-                self.idx + QUEUE_SIZE - offset
-            } else {
-                self.idx - offset
-            };
-            Some(&self.packet[idx])
-        } else {
-            None
-        }
-    }
-}
-
-impl TestPacketQueue {
-    fn new() -> Self {
-        TestPacketQueue {
-            len: 0,
-            idx: 0,
-            packet: Default::default(),
         }
     }
 }
