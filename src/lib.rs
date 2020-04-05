@@ -235,12 +235,12 @@ impl Transmitter {
     }
 }
 
-pub struct Context {
+pub struct EndPoint {
     tx: Transmitter,
     rx: Receiver,
 }
 
-impl Context {
+impl EndPoint {
     pub fn new() -> Self {
         Self {
             tx: Transmitter::new(),
@@ -300,7 +300,7 @@ mod tests {
     use crate::traits::SOF;
     use log::info;
 
-    impl Context {
+    impl EndPoint {
         // Parse a bunch of bytes and return the first return code that isn't
         // MoreDataNeeded. This means that this function will parse at most one
         // error or packet from the input stream, which is fine for testing.
@@ -345,46 +345,46 @@ mod tests {
         let mut storage1 = TestStorage::new();
         let mut storage2 = TestStorage::new();
 
-        let mut ctx1 = Context::new();
-        let mut ctx2 = Context::new();
+        let mut ep1 = EndPoint::new();
+        let mut ep2 = EndPoint::new();
 
-        ctx1.connect(&mut storage1);
+        ep1.connect(&mut storage1);
 
         // This should put a SYN0 packet into packet2
         assert_eq!(storage1.tx_vec(), vec![SOF, 0xc0, 0x74, 0x36, SOF]);
 
         // Sending the SYN0 to the other side, should generate a SYN1 in response
         assert_eq!(
-            ctx2.parse_bytes(storage1.tx_data(), &mut storage2),
+            ep2.parse_bytes(storage1.tx_data(), &mut storage2),
             ParseResult::MoreDataNeeded
         );
         assert_eq!(storage2.tx_vec(), vec![SOF, 0xc1, 0xfd, 0x27, SOF]);
 
         // Sending SYN1 to initial side should generate a SYN2 in response Side 1 should be connected
         assert_eq!(
-            ctx1.parse_bytes(storage2.tx_data(), &mut storage1),
+            ep1.parse_bytes(storage2.tx_data(), &mut storage1),
             ParseResult::MoreDataNeeded
         );
-        assert!(ctx1.is_connected());
+        assert!(ep1.is_connected());
         assert_eq!(storage1.tx_vec(), vec![SOF, 0xc2, 0x66, 0x15, SOF]);
 
         // Sending the SYN2 to Side 2 should then put it into a connected state
         assert_eq!(
-            ctx2.parse_bytes(storage1.tx_data(), &mut storage2),
+            ep2.parse_bytes(storage1.tx_data(), &mut storage2),
             ParseResult::MoreDataNeeded
         );
-        assert!(ctx2.is_connected());
+        assert!(ep2.is_connected());
         assert_eq!(storage2.tx_vec(), vec![]);
 
         // Send a User packet from Side 1 to Side 2
 
-        ctx1.write_packet("Testing".as_bytes(), &mut storage1);
+        ep1.write_packet("Testing".as_bytes(), &mut storage1);
         assert_eq!(
             storage1.tx_vec(),
             vec![SOF, 0x00, 0x54, 0x65, 0x73, 0x74, 0x69, 0x6e, 0x67, 0xc5, 0x5c, SOF]
         );
         assert_eq!(
-            ctx2.parse_bytes(storage1.tx_data(), &mut storage2),
+            ep2.parse_bytes(storage1.tx_data(), &mut storage2),
             ParseResult::UserPacket
         );
         assert_eq!(storage2.rx_data(), "Testing".as_bytes());
